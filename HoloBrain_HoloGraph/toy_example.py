@@ -1,6 +1,10 @@
 import torch
 import matplotlib.pyplot as plt
 
+"""
+一个简单的仿真实验
+
+"""
 # Set random seed
 torch.manual_seed(0)
 

@@ -8,6 +8,13 @@ import math
 import sys
 # ---- Load your custom CFC utilities ----
 # Make sure these are defined in the same file or imported from a module
+
+"""
+CFC先经过了图小波变化
+对每个脑区的BOLD信号先转为10个power信号 小波滤波器 得到10个随时间变化的BOLD序列
+计算这10个序列两两之间的相关性得到一个10*10的矩阵
+将每个脑区的矩阵结合起来取平均得到全脑的10*10的矩阵
+"""
 def thresholding(fc, data_path, ratio=0.8):
     node_num = fc.shape[-1]
     fc[fc < 0] = 0

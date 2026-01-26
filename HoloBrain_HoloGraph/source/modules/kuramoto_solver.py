@@ -5,6 +5,7 @@ import numpy as np
 from torch_geometric.nn import GCNConv
 
 class OmegaModule(nn.Module):
+    # 与节点固有频率有关
     def __init__(self, hidden_dim):
         super(OmegaModule, self).__init__()
         self.hidden_dim = hidden_dim
@@ -22,6 +23,7 @@ class OmegaModule(nn.Module):
         return omega_x
 
 class SyncModule(nn.Module):
+    # 计算矩阵K？？这里的adj是拉普拉斯矩阵还是邻接矩阵？？
     def __init__(self, num_nodes):
         super(SyncModule, self).__init__()
         self.param = nn.Parameter(torch.empty(num_nodes, num_nodes))
@@ -34,6 +36,8 @@ class SyncModule(nn.Module):
         return output
     
 class f_phi(nn.Module):
+    # 把X映射成y，这个y是怎么生成的？？
+    # 好像用的图卷积？
     def __init__(self, in_channels,  mapping_type, N):
         super(f_phi, self).__init__()
         self.mapping_type = mapping_type
@@ -61,6 +65,7 @@ class f_phi(nn.Module):
         return edge_index
 
 class Kuramoto_Solver(nn.Module):  
+    # 进行动力学演化
     def __init__(self, N, hidden_dim, beta, T, L, mapping_type='conv', num_modes=116):
         super().__init__()
         self.N = N
@@ -74,17 +79,23 @@ class Kuramoto_Solver(nn.Module):
         self.omega_module = OmegaModule(hidden_dim)
         self.sync_module = SyncModule(num_modes)
         self.norm_y = nn.GroupNorm(hidden_dim // N, hidden_dim, affine=True)
-        self.f_phi = f_phi(in_channels=hidden_dim, out_channels=hidden_dim, mapping_type=mapping_type, N=N)
-        
+        # 这个f_phi有问题，传输的参数不对
+        # self.f_phi = f_phi(in_channels=hidden_dim, out_channels=hidden_dim, mapping_type=mapping_type, N=N)
+        self.f_phi = f_phi(in_channels=hidden_dim, mapping_type=mapping_type, N=N)
+
+    # 对节点进行状态更新
     def surrounding_osc(self, x: torch.Tensor, y: torch.Tensor, adj: torch.Tensor, memory_level=1):
         wx = self.sync_module(adj, x)
         z = wx + memory_level * y
         return z
     
     def project_osc(self, x, z):
+        # 完成投影操作
         B, T, C = x.shape
+        # 将x，z都转为B T N D四维
         x = x.transpose(1, 2).unflatten(1, (self.N, C // self.N))
         z = z.transpose(1, 2).unflatten(1, (self.N, C // self.N))
+        # 这是什么意思？
         phi_z = z - torch.sum(x * z, dim=-1, keepdim=True) * x
         phi_z = phi_z.flatten(1, 2).transpose(1, 2)
         return phi_z
@@ -95,19 +106,24 @@ class Kuramoto_Solver(nn.Module):
     
     def map_to_sphere(self, x):
         x = x.transpose(1, 2).unflatten(1, (-1, self.N))
-        x = F.normalize(x, dim=2)
+        x = F.normalize(x, dim=2)   # 归一化
         x = x.flatten(1, 2).transpose(1, 2)
         return x
 
     
     def forward(self, x, y, adj):
         x_L = []
+
         for _ in range(self.L):
+            # 这里是对y进行标准化处理吗
             y = self.norm_y(y)
+            # 这里的代码是什么意思
             y = y.transpose(1, 2) if y.shape[1]==self.hidden else y #[B, T, C]
             x = x.transpose(1, 2) if x.shape[1]==self.hidden else x #[B, T, C]
             x = self.map_to_sphere(x)
             for _ in range(self.T):
+                # 这里完成对x的多次更新
+                # 为什么每次更新都要重新计算x的固定频率
                 omega = self.omega_module(x)
                 Z = self.surrounding_osc(x, y, adj)
                 Phi_Z = self.project_osc(x, Z)

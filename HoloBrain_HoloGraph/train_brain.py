@@ -20,30 +20,40 @@ from ema_pytorch import EMA
 
 
 def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, logger):
+    # 进行一次训练
     model.train()
     total_loss = 0.0
-    
     criterion = nn.CrossEntropyLoss()
+
+
     for batch_idx, (features, adj, targets) in enumerate(train_loader):
         features = features.to(device)
         adj = adj.to(device)
+
+        # unsqueeze： 如果输入的数据是两维的就插入一个维度变成三维。
         if features.dim() == 2:
             features = features.unsqueeze(0)
+
         targets = targets.to(device)
+        # 修改标签维度，这个损失函数只能融入一维的标签。
         targets = targets.squeeze(1) if targets.dim() == 2 else targets
 
         optimizer.zero_grad()
         outputs, x_features, y_features = model(features, adj)
+
+        # 在多GPU上训练时，将多个GPU上的数据可以互相观测到
         if accelerator.num_processes > 1:
             outputs = torch.cat(all_gather(outputs), dim=0)
             targets = torch.cat(all_gather(targets), dim=0)
 
         loss = criterion(outputs, targets)
+        # accelerator:混合多卡时比较适用
         accelerator.backward(loss)
         optimizer.step()
         scheduler.step()
 
         total_loss += loss.item()
+        # ema是什么
         ema.update() 
 
     avg_loss = total_loss / len(train_loader)
@@ -140,16 +150,22 @@ def main():
     all_fold_acc = []
     all_fold_pre = []
     all_fold_f1 = []
-
+    # k折交叉验证
     for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(dataset)):
+
         logger.info(f"Fold {fold_idx}:")
+
+        # sbuset: 拆分数据按照train_idx
         train_subset = Subset(dataset, train_idx)
         test_subset = Subset(dataset, test_idx)
+
         if accelerator.is_main_process:
             logger.info(f"Train samples: {len(train_subset):,}, Test samples: {len(test_subset):,}")
+        
         train_loader = DataLoader(
             train_subset,
-            batch_size=args.batch_size // accelerator.num_processes,
+            # 这里写错了变量名应该是args.batchsize, 默认256有点太大
+            batch_size=args.batchsize // accelerator.num_processes,
             shuffle=True,
             num_workers=args.num_workers,
         )
@@ -159,14 +175,15 @@ def main():
             shuffle=False,
             num_workers=args.num_workers,
         )
-
+        # 初始化模型
+        # N是振子的维度，默认为4 h是隐藏层维度。
         model = BRICK(
             N=args.N,
             hidden_dim=args.h,
-            L=args.L,
-            T=args.T,
-            num_class=args.num_class,
-            beta=args.beta,
+            L=args.L,   # kuramoto的次数
+            T=args.T,   # 时间步的数量，时间步是什么？？
+            num_class=args.num_class,   # 分类数
+            beta=args.beta, # ？？？
             feature_dim=args.feature_dim,
             num_nodes=args.num_nodes,
             use_pe=args.use_pe,
@@ -176,25 +193,32 @@ def main():
             parcellation=args.parcellation,
         ).to(device)
 
+
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(f"Total trainable parameters: {total_params:,}")
 
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.0)
+        # 训练的参数梯度表
         scheduler = LinearWarmupScheduler(optimizer, warmup_iters=args.warmup_iters)
+        # ema是什么
         ema = EMA(model, beta=args.eam_decay, update_every=10, update_after_step=200)
 
         if accelerator.is_main_process:
             logger.info(f"Starting training for {args.epochs} epochs...")
 
         best_test_acc, best_pre, best_f1 = 0, 0, 0
-        for epoch in range(args.epochs):
+
+        # 开始训练epochs次
+        for epoch in range(args.epochs):    
             epoch_loss = train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, logger)
             start_time = time.time()
             metrics, features, inputs_data, gt = evaluate(model, accelerator, test_loader, device, logger)
-            elapsed_ms = (time.time() - start_time) * 1000 / len(gt)
+            elapsed_ms = (time.time() - start_time) * 1000 / len(gt)    # 计算总用时
             test_acc, pre, rec, f1 = metrics
             logger.info(f"Epoch {epoch+1}: Test Acc: {test_acc:.4f}, Precision: {pre:.4f}, Recall: {rec:.4f}, F1: {f1:.4f} "
                         f"(Avg inference time: {elapsed_ms:.2f} ms)")
+            
+            # 更新准确值
             if test_acc > best_test_acc:
                 best_test_acc, best_pre, best_f1 = test_acc, pre, f1
                 np.save(os.path.join(".", f"fold_{fold_idx}_features.npy"), features.cpu().detach().numpy())

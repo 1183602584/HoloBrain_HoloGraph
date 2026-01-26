@@ -13,6 +13,7 @@ def logger():
         logger.addHandler(handler)
     return logger
 
+# 学习率调整
 class LinearWarmupScheduler(_LRScheduler):
     def __init__(self, optimizer, warmup_iters, last_epoch=-1):
         self.warmup_iters = warmup_iters
@@ -26,7 +27,7 @@ class LinearWarmupScheduler(_LRScheduler):
         else:
             return self.base_lrs
 
-        
+# 计算加权分类指标，目的是什么？？
 def compute_weighted_metrics(preds, gts):
     num_classes = len(torch.unique(gts))
     device = preds.device

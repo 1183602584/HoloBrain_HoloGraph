@@ -1,11 +1,14 @@
 import torch
 
 class Wavelet(torch.nn.Module):
+    # 导入module父类，为了以后可以将gst过程变成可学习的
     def __init__(self, wavelet=[0, 1, 2], level=2):
         super(Wavelet, self).__init__()
         self.wavelet = wavelet
         self.level = level
 
+
+    # 返回的小波滤波器组，和低通滤波器
     def construct_wavelet(self, adj):
         adj = self.no_zero_adj(adj)
         wavelets = []
@@ -14,11 +17,13 @@ class Wavelet(torch.nn.Module):
             raise ValueError("The adj has isolated nodes (degree=0).")
         D = torch.diag_embed(degree)
         D = D.to(adj.device)
+        # 这里实际上是构造了拉普拉斯矩阵
         adj = D - adj
         D_inverse = torch.inverse(D)
         D_inverse[D_inverse == float("inf")] = 0.0
         I_n = torch.eye(adj.size(-1)).unsqueeze(0).repeat(adj.size(0), 1, 1).float()
         I_n = I_n.to(adj.device)
+        # 这里与论文不一致，这里是I - L @ D_inv
         adj = 0.5 * (I_n + torch.bmm(adj, D_inverse))
         adj_sct = adj.float()
         adj_power = adj_sct.clone()
@@ -29,14 +34,18 @@ class Wavelet(torch.nn.Module):
             if order > 1:
                 adj_power = torch.bmm(adj_power, adj_power)
             # S^n(S^n-I)
+            # 这一项等价于 P^{2^k} - P^{2^{k+1}}（因为 A(I-A)=A-A^2），
+            # 所以它是在构造 \Psi_h 的那一族差分滤波器（只是索引/幂次的对应关系由 wavelet=[0,1,2] 决定）。
             adj_int = torch.bmm(adj_power, I_n - adj_power)
             wavelets.append(adj_int)
             # print(adj_int.shape)
-
+        # low_pass 是低通滤波
         low_pass = torch.bmm(adj_power, adj_power)  # t^(2^j)
         low_pass = torch.bmm(low_pass, low_pass)  # t^(2^(j+1))
         return wavelets, low_pass
 
+
+# 临界矩阵度为零的点的处理办法。
     def no_zero_adj(self, adj):
         batch_size, n, _ = adj.shape
         adj_fixed_batch = adj.clone()
@@ -67,15 +76,18 @@ class Wavelet(torch.nn.Module):
 
         return adj_fixed_batch
 
+# 将原始信号转为小波滤波器处理后的
     def windowed(self, x, adj):
-        # x: B x N x T
         # y: B x N x T x dim
         wavelets, low_pass = self.construct_wavelet(adj)
         outputs = [[x.transpose(1, 2)]]
         for layer in range(self.level):
             layer_output = []
+            # 拿出时间维度
             for input in outputs[-1]:
+                # 小波滤波器组也是N*N的
                 for wavelet in wavelets:
+                    # 感觉这个乘法的数据并未对齐
                     out = torch.matmul(wavelet, input)
                     out = torch.abs(out)
                     layer_output.append(out)
@@ -87,15 +99,20 @@ class Wavelet(torch.nn.Module):
         basis = basis.view(basis.shape[0], basis.shape[1], -1)
         scattering_coeff = torch.matmul(low_pass, basis)
         scattering_coeff = scattering_coeff.view(basis_shape)
+        # 这里返回的BNTdim，不然矩阵乘法会失败
         # B x N x T x dim
         return scattering_coeff
 
+
+# 这块感觉比较重要
     def nonwindowed(self, x, adj):
         wavelets, low_pass = self.construct_wavelet(adj)
+        # 这里不太理解？？
         outputs = [[x.transpose(1, 2)]]
         for layer in range(self.level):
             layer_output = []
             for input in outputs[-1]:
+                # 拿出一个用例，乘以H个小波滤波器
                 for wavelet in wavelets:
                     out = torch.matmul(wavelet, input)
                     out = torch.abs(out)
