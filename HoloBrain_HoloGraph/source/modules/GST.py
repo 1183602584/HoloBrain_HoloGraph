@@ -42,6 +42,7 @@ class Wavelet(torch.nn.Module):
         # low_pass 是低通滤波
         low_pass = torch.bmm(adj_power, adj_power)  # t^(2^j)
         low_pass = torch.bmm(low_pass, low_pass)  # t^(2^(j+1))
+
         return wavelets, low_pass
 
 
@@ -80,15 +81,20 @@ class Wavelet(torch.nn.Module):
     def windowed(self, x, adj):
         # y: B x N x T x dim
         wavelets, low_pass = self.construct_wavelet(adj)
+        # 这里面将x转置了
         outputs = [[x.transpose(1, 2)]]
         for layer in range(self.level):
             layer_output = []
             # 拿出时间维度
             for input in outputs[-1]:
                 # 小波滤波器组也是N*N的
+                # wavelet 是一个有三个项的列表，每项由一个B*116*116的矩阵组成
                 for wavelet in wavelets:
-                    # 感觉这个乘法的数据并未对齐
+
+                    print(f"wavelet:{wavelet.shape} , input:{input.shape}")
+
                     out = torch.matmul(wavelet, input)
+                    print(f"out:{out.shape}")
                     out = torch.abs(out)
                     layer_output.append(out)
             outputs.append(layer_output)
@@ -96,7 +102,10 @@ class Wavelet(torch.nn.Module):
         basis = torch.cat([torch.stack(layer, dim=-1) for layer in outputs], dim=-1)
 
         basis_shape = basis.shape
+        print(f"basis_spae:{basis_shape}")
+        # 将后两个维度合并为一个维度
         basis = basis.view(basis.shape[0], basis.shape[1], -1)
+        # 这里为什么还要再乘以一个低通
         scattering_coeff = torch.matmul(low_pass, basis)
         scattering_coeff = scattering_coeff.view(basis_shape)
         # 这里返回的BNTdim，不然矩阵乘法会失败

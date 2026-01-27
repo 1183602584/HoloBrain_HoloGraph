@@ -16,7 +16,8 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from source.brick import BRICK
 
-model = BRICK() 
+model = BRICK(feature_dim=175) 
 X = torch.Tensor(torch.randn(5, 175, 116))
 adj = torch.Tensor(torch.randn(5, 116, 116))
-y_hat = model(X, adj)
+y_hat, _, _ = model(X, adj)
+print(f"y_hat={y_hat}")

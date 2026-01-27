@@ -36,7 +36,7 @@ class BRICK(nn.Module):
 
         self.gst = Wavelet(wavelet=[0, 1, 2], level=1)
         self.x_processor = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(feature_dim * 4, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
@@ -62,7 +62,7 @@ class BRICK(nn.Module):
             nn.ReLU(),
             nn.Linear(4 * hidden_dim, num_classes),
         )
-        # 输出预测节点是什么？？？
+
         self.out_pred_node = nn.Sequential( 
             nn.Linear(hidden_dim, 4 * hidden_dim),  
             nn.ReLU(), 
@@ -83,10 +83,12 @@ class BRICK(nn.Module):
     def forward(self, features, adj):
         # 计算控制y
         # 这里y的维度是B T N
+        # 这里生成一个简单的初始控制信号y
         if self.y_type == "linear":
             y = self.linear_y(features.transpose(1, 2)).transpose(1, 2)
         else:
             y = self.conv_y(features.squeeze().T, torch.nonzero(adj, as_tuple=False).T).T.unsqueeze(0)
+        # 对最初的y进行保存
         saved_y = y.clone()
 
         # 用邻接矩阵放入gst中计算，只对时间维度进行处理，windowed模式
@@ -94,24 +96,31 @@ class BRICK(nn.Module):
         x = self.gst(features, adj)
         # flatten后x的维度变为B N T*dim
         x = torch.flatten(x, start_dim=2)
+        
+        # 这一步是通过MLP提取信息
         x = self.x_processor(x).transpose(1, 2)
-
+        print(f"pe_y_pre:{y.shape}")
         # pe是什么
         if self.use_pe:
             y = y + self.pe_y[None, :, :]
             x = x + self.pe_x[None, :, :]
-        # 放入 kuramoto 中进行物理演化
+
+        print(f"y_pred:{y.shape}")
+        # 放入 kuramoto 中进行物理演化，这里返回的y是最新的y
         x, y, saved_x = self.kuramoto_solver(x, y, adj)
         
-        # 对x进行分类任务
+        # 适用于无监督学习
         if self.parcellation:
             w_matrix = saved_y.reshape(saved_y.shape[0], -1)
             output = y.transpose(1, 2).reshape(y.shape[0], -1)
             return output, w_matrix, saved_x, saved_y
-        
+        # 脑区分类，每个节点一个预测
         if self.node_classification:
             output = self.out_pred_node(y.transpose(1, 2))
         else:
+            # 这是做多分类任务，y来自于x经过kuramoto演变再进行f_phi函数获得的
             output = self.out_pred(y)
+            # print(f"直接传入x进行预测, x.shape{x.shape}")
+            # output = self.out_pred(x)
 
         return output, saved_x, saved_y

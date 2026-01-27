@@ -1,4 +1,4 @@
-from dataset import *
+from source.data.dataset import *
 
 def create_dataset(data):
     
@@ -35,5 +35,18 @@ def create_dataset(data):
         dataset = HCPA_byregion(
             bold_dir='./HCP-A-SC_FC/AAL_116/BOLD', 
             label_path='./region_label.txt'
+        )
+        
+        
+    elif data == "ABIDE":
+        dataset = ABIDE_BoldFCDataset(
+            ts_dir="/home/hezhenkun/nilearn_data/ABIDE_pcp/cpac/nofilt_noglobal",
+            phenotypic_csv="/home/hezhenkun/nilearn_data/ABIDE_pcp/Phenotypic_V1_0b_preprocessed1.csv",
+            atlas="aal",
+            expected_n=116,
+            fix_len=175,
+            k=15,
+            use_abs=True,
+            cache_fc_path="/home/hezhenkun/nilearn_data/abide_fc_cache.npy",  # 可选：强烈建议开
         )
     return dataset

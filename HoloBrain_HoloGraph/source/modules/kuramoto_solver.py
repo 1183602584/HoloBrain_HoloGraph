@@ -13,14 +13,30 @@ class OmegaModule(nn.Module):
 
     def forward(self, x):
         B, T, C = x.shape
-        x_reshaped = x.transpose(1, 2).unflatten(1, (C // 2, 2))
-        omega = torch.linalg.norm(self.omega_param, dim=1)  
-        omega = omega.unsqueeze(0)  
-        while omega.ndim < x_reshaped.ndim:
-            omega = omega.unsqueeze(-1)
-        omega_x = torch.stack([omega * x_reshaped[:, :, 1], -omega * x_reshaped[:, :, 0]], dim=2)
-        omega_x = omega_x.flatten(1, 2).transpose(1, 2)
+        x_reshaped = x.transpose(1, 2).unflatten(1, (C // 2, 2))  # (B,128,2,T)
+
+        omega = torch.linalg.norm(self.omega_param, dim=1).view(1, -1, 1, 1)  # (1,128,1,1)
+
+        # 保持 4D： (B,128,1,T)
+        x1 = x_reshaped[:, :, 1:2, :]
+        x0 = x_reshaped[:, :, 0:1, :]
+
+        omega_x = torch.cat([omega * x1, -omega * x0], dim=2)  # (B,128,2,T)
+        omega_x = omega_x.flatten(1, 2).transpose(1, 2)        # (B,T,256)
         return omega_x
+"""
+这里的写法会有维数对不齐的问题
+"""
+    # def forward(self, x):
+    #     B, T, C = x.shape
+    #     x_reshaped = x.transpose(1, 2).unflatten(1, (C // 2, 2))
+    #     omega = torch.linalg.norm(self.omega_param, dim=1)  
+    #     omega = omega.unsqueeze(0)  
+    #     while omega.ndim < x_reshaped.ndim:
+    #         omega = omega.unsqueeze(-1)
+    #     omega_x = torch.stack([omega * x_reshaped[:, :, 1], -omega * x_reshaped[:, :, 0]], dim=2)
+    #     omega_x = omega_x.flatten(1, 2).transpose(1, 2)
+    #     return omega_x
 
 class SyncModule(nn.Module):
     # 计算矩阵K？？这里的adj是拉普拉斯矩阵还是邻接矩阵？？
@@ -34,10 +50,8 @@ class SyncModule(nn.Module):
         P_new = sym_param * adj  
         output = F.relu(torch.matmul(P_new, x))
         return output
-    
+
 class f_phi(nn.Module):
-    # 把X映射成y，这个y是怎么生成的？？
-    # 好像用的图卷积？
     def __init__(self, in_channels,  mapping_type, N):
         super(f_phi, self).__init__()
         self.mapping_type = mapping_type
@@ -49,16 +63,57 @@ class f_phi(nn.Module):
         self.bias = nn.Parameter(torch.zeros(in_channels))
         
     def forward(self, x, adj):
+        print(f"f_phi-----------------------")
+        print(f"x.shape{x.shape}")
+        # x进入时是 B N T*dim
+        # mappint_type默认是 conv
         if self.mapping_type == 'conv':
             x = x.permute(0, 2, 1)  
+            print(f"x.shape{x.shape}")
             x = self.mapping_conv(x)  
+            print(f"x.shape{x.shape}")
         elif self.mapping_type == 'gconv':
             edge_index = self._get_edge_index(adj.squeeze())
             x = self.mapping_gconv(x.squeeze(0), edge_index).T.unsqueeze(0)
         x = x.unflatten(1, (self.N, -1))
-        x = torch.linalg.norm(x, dim=2)
+        print(f"x.shape{x.shape}")
+        x = x.mean(dim=1)
+        #x = torch.linalg.norm(x, dim=2)
+        print(f"x.shape{x.shape}")
+        # 这一行会报错
         x = x + self.bias.unsqueeze(0).unsqueeze(-1)
+
+        print(f"x.shape{x.shape}")
         return x
+    
+# class f_phi(nn.Module):
+#     def __init__(self, in_channels,  mapping_type, N):
+#         super(f_phi, self).__init__()
+#         self.mapping_type = mapping_type
+#         self.N = N
+#         if self.mapping_type == 'conv':
+#             self.mapping_conv = nn.Conv1d(in_channels, in_channels * N, kernel_size=1)
+#         elif self.mapping_type == 'gconv':
+#             self.mapping_gconv = GCNConv(in_channels, in_channels * N)
+#         self.bias = nn.Parameter(torch.zeros(in_channels))
+        
+#     def forward(self, x, adj):
+#         if self.mapping_type == 'conv':
+#             x = x.permute(0, 2, 1)  
+#             x = self.mapping_conv(x)  
+#         elif self.mapping_type == 'gconv':
+#             edge_index = self._get_edge_index(adj.squeeze())
+#             x = self.mapping_gconv(x.squeeze(0), edge_index).T.unsqueeze(0)
+#         x = x.unflatten(1, (self.N, -1))
+
+
+#         bias = self.bias.view(1, 1, -1, 1)        # ✅ (1,1,256,1)
+#         print(f"bias:{bias.shape}       x:{x.shape}")
+#         x = x + bias
+
+#         x = torch.linalg.norm(x, dim=2)
+#         # x = x + self.bias.unsqueeze(0).unsqueeze(-1)
+#         return x
     
     def _get_edge_index(self, adj):
         edge_index = torch.nonzero(adj, as_tuple=False).T
@@ -101,7 +156,11 @@ class Kuramoto_Solver(nn.Module):
         return phi_z
     
     def update_osc(self, omega_x, phi_z):
-        delta_x = omega_x + self.beta * phi_z.flatten(1, 2).transpose(1, 2)
+        # 这里的维度也对不齐
+        print(f"omega:{omega_x.shape}     phi_z:{phi_z.shape}")
+        # 这里已经对其，直接加即可
+        # delta_x = omega_x + self.beta * phi_z.flatten(1, 2).transpose(1, 2)
+        delta_x = omega_x + self.beta * phi_z
         return delta_x
     
     def map_to_sphere(self, x):
@@ -113,22 +172,26 @@ class Kuramoto_Solver(nn.Module):
     
     def forward(self, x, y, adj):
         x_L = []
-
+        print(f"y-----------:{y.shape}")
+        print(f"x----------{x.shape}")
         for _ in range(self.L):
-            # 这里是对y进行标准化处理吗
             y = self.norm_y(y)
-            # 这里的代码是什么意思
-            y = y.transpose(1, 2) if y.shape[1]==self.hidden else y #[B, T, C]
-            x = x.transpose(1, 2) if x.shape[1]==self.hidden else x #[B, T, C]
+
+            y = y.transpose(1, 2) if y.shape[1]==self.hidden_dim else y #[B, T, C]
+            x = x.transpose(1, 2) if x.shape[1]==self.hidden_dim else x #[B, T, C]
+            print(f"y.shape:{y.shape}   x.shape:{x.shape}")
             x = self.map_to_sphere(x)
+            print(f"x----------{x.shape}")
             for _ in range(self.T):
                 # 这里完成对x的多次更新
                 # 为什么每次更新都要重新计算x的固定频率
+                # 这里面的y一只不动，每次变动的只有固有频率omega
                 omega = self.omega_module(x)
                 Z = self.surrounding_osc(x, y, adj)
                 Phi_Z = self.project_osc(x, Z)
                 Delta_X = self.update_osc(omega, Phi_Z)
                 x = self.map_to_sphere(Delta_X) 
+                # 这一步是保存x的快照
                 x_L.append(x.unsqueeze(1))
                 
             y = self.f_phi(x, adj)

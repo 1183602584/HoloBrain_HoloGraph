@@ -18,6 +18,18 @@ from source.data.create_dataset import create_dataset
 from source.brick import BRICK  
 from ema_pytorch import EMA  
 
+"""
+代码流程：
+读取数据:feature adj label
+brick:
+    计算控制信号y   x放入gst进行扩展    x扩展后提取高维特征
+    x,y放入kuramoto模型中进行演化:
+        演化时,控制信号y不变,omega每个时间步都需要变化。(这里与论文描述相反)
+        演化结束后,x通过f_phi函数得到y,y放入卷积模型进行分类任务
+"""
+
+
+
 
 def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, logger):
     # 进行一次训练
@@ -46,6 +58,7 @@ def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, devic
             outputs = torch.cat(all_gather(outputs), dim=0)
             targets = torch.cat(all_gather(targets), dim=0)
 
+        # 输出与标签进行比较 output [B, hidden*N] 
         loss = criterion(outputs, targets)
         # accelerator:混合多卡时比较适用
         accelerator.backward(loss)
@@ -113,7 +126,7 @@ def main():
     parser.add_argument("--batchsize", type=int, default=256)  
     parser.add_argument("--num_workers", type=int, default=8)
 
-    parser.add_argument("--data", type=str, default="HCP-YA", help="Dataset name")
+    parser.add_argument("--data", type=str, default="ABIDE", help="Dataset name")
     parser.add_argument("--num_nodes", type=int, default=116, help="Number of nodes")
     parser.add_argument("--feature_dim", type=int, default=175, help="Input feature dimension")
     parser.add_argument("--num_class", type=int, default=4, help="Number of classes")
@@ -140,9 +153,7 @@ def main():
     device = accelerator.device
     # device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
 
-    logger = logger()
-    logger.info("Init successfully")
-    
+    log = logger()
     dataset = create_dataset(args.data)
 
     splits = 5
@@ -153,14 +164,14 @@ def main():
     # k折交叉验证
     for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(dataset)):
 
-        logger.info(f"Fold {fold_idx}:")
+        log.info(f"Fold {fold_idx}:")
 
         # sbuset: 拆分数据按照train_idx
         train_subset = Subset(dataset, train_idx)
         test_subset = Subset(dataset, test_idx)
 
         if accelerator.is_main_process:
-            logger.info(f"Train samples: {len(train_subset):,}, Test samples: {len(test_subset):,}")
+            log.info(f"Train samples: {len(train_subset):,}, Test samples: {len(test_subset):,}")
         
         train_loader = DataLoader(
             train_subset,
@@ -171,7 +182,7 @@ def main():
         )
         test_loader = DataLoader(
             test_subset,
-            batch_size=args.batch_size // accelerator.num_processes,
+            batch_size=args.batchsize // accelerator.num_processes,
             shuffle=False,
             num_workers=args.num_workers,
         )
@@ -182,7 +193,7 @@ def main():
             hidden_dim=args.h,
             L=args.L,   # kuramoto的次数
             T=args.T,   # 时间步的数量，时间步是什么？？
-            num_class=args.num_class,   # 分类数
+            num_classes=args.num_class,   # 分类数
             beta=args.beta, # ？？？
             feature_dim=args.feature_dim,
             num_nodes=args.num_nodes,
@@ -195,16 +206,16 @@ def main():
 
 
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Total trainable parameters: {total_params:,}")
+        log.info(f"Total trainable parameters: {total_params:,}")
 
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.0)
         # 训练的参数梯度表
         scheduler = LinearWarmupScheduler(optimizer, warmup_iters=args.warmup_iters)
         # ema是什么
-        ema = EMA(model, beta=args.eam_decay, update_every=10, update_after_step=200)
+        ema = EMA(model, beta=args.ema_decay, update_every=10, update_after_step=200)
 
         if accelerator.is_main_process:
-            logger.info(f"Starting training for {args.epochs} epochs...")
+            log.info(f"Starting training for {args.epochs} epochs...")
 
         best_test_acc, best_pre, best_f1 = 0, 0, 0
 
@@ -215,7 +226,7 @@ def main():
             metrics, features, inputs_data, gt = evaluate(model, accelerator, test_loader, device, logger)
             elapsed_ms = (time.time() - start_time) * 1000 / len(gt)    # 计算总用时
             test_acc, pre, rec, f1 = metrics
-            logger.info(f"Epoch {epoch+1}: Test Acc: {test_acc:.4f}, Precision: {pre:.4f}, Recall: {rec:.4f}, F1: {f1:.4f} "
+            log.info(f"Epoch {epoch+1}: Test Acc: {test_acc:.4f}, Precision: {pre:.4f}, Recall: {rec:.4f}, F1: {f1:.4f} "
                         f"(Avg inference time: {elapsed_ms:.2f} ms)")
             
             # 更新准确值
@@ -229,7 +240,7 @@ def main():
             torch.save(accelerator.unwrap_model(model).state_dict(), os.path.join(".", "model.pth"))
             torch.save(ema.state_dict(), os.path.join(".", "ema_model.pth"))
 
-        logger.info(f"Fold {fold_idx}: Best Test Acc: {best_test_acc:.4f}, Precision: {best_pre:.4f}, F1: {best_f1:.4f}")
+        log.info(f"Fold {fold_idx}: Best Test Acc: {best_test_acc:.4f}, Precision: {best_pre:.4f}, F1: {best_f1:.4f}")
         all_fold_acc.append(best_test_acc)
         all_fold_pre.append(best_pre)
         all_fold_f1.append(best_f1)
@@ -237,10 +248,10 @@ def main():
     avg_acc = np.mean(all_fold_acc)
     avg_pre = np.mean(all_fold_pre)
     avg_f1 = np.mean(all_fold_f1)
-    logger.info(f"Final Results -- Average Test Acc: {avg_acc:.4f}, Precision: {avg_pre:.4f}, F1: {avg_f1:.4f}")
-    logger.info(f"All folds Accuracies: {all_fold_acc}")
-    logger.info(f"All folds Precisions: {all_fold_pre}")
-    logger.info(f"All folds F1 scores: {all_fold_f1}")
+    log.info(f"Final Results -- Average Test Acc: {avg_acc:.4f}, Precision: {avg_pre:.4f}, F1: {avg_f1:.4f}")
+    log.info(f"All folds Accuracies: {all_fold_acc}")
+    log.info(f"All folds Precisions: {all_fold_pre}")
+    log.info(f"All folds F1 scores: {all_fold_f1}")
 
 
 if __name__ == "__main__":
