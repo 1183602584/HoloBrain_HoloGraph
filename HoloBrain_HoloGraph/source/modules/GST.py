@@ -17,14 +17,16 @@ class Wavelet(torch.nn.Module):
             raise ValueError("The adj has isolated nodes (degree=0).")
         D = torch.diag_embed(degree)
         D = D.to(adj.device)
+
         # 这里实际上是构造了拉普拉斯矩阵
-        adj = D - adj
-        D_inverse = torch.inverse(D)
-        D_inverse[D_inverse == float("inf")] = 0.0
+        L = D - adj
+        D_inverse = torch.inverse(D)        # 矩阵求逆
+        D_inverse[D_inverse == float("inf")] = 0.0      # 这里将无穷大转为0（求逆后可能出现无穷大）
         I_n = torch.eye(adj.size(-1)).unsqueeze(0).repeat(adj.size(0), 1, 1).float()
         I_n = I_n.to(adj.device)
-        # 这里与论文不一致，这里是I - L @ D_inv
-        adj = 0.5 * (I_n + torch.bmm(adj, D_inverse))
+        # 这是列归一化的懒惰随机游走=I + adj * D^-1，改成标准的懒惰随机游走了
+        adj = I_n - 0.5 * (D_inverse @ L)
+        # adj = 0.5 * (I_n + torch.bmm(adj, D_inverse))
         adj_sct = adj.float()
         adj_power = adj_sct.clone()
         for order in self.wavelet:
@@ -33,16 +35,11 @@ class Wavelet(torch.nn.Module):
                 continue
             if order > 1:
                 adj_power = torch.bmm(adj_power, adj_power)
-            # S^n(S^n-I)
-            # 这一项等价于 P^{2^k} - P^{2^{k+1}}（因为 A(I-A)=A-A^2），
-            # 所以它是在构造 \Psi_h 的那一族差分滤波器（只是索引/幂次的对应关系由 wavelet=[0,1,2] 决定）。
             adj_int = torch.bmm(adj_power, I_n - adj_power)
             wavelets.append(adj_int)
-            # print(adj_int.shape)
-        # low_pass 是低通滤波
+            # for结束后构造出了 [phi0、phi1、phi2、phi3] 列表
         low_pass = torch.bmm(adj_power, adj_power)  # t^(2^j)
         low_pass = torch.bmm(low_pass, low_pass)  # t^(2^(j+1))
-
         return wavelets, low_pass
 
 
@@ -55,17 +52,20 @@ class Wavelet(torch.nn.Module):
             adj = adj_fixed_batch[b]
             zero_row_mask = (adj.sum(dim=-1) == 0)
             zero_row_indices = torch.where(zero_row_mask)[0]
-            if len(zero_row_indices) == 0:
+            if len(zero_row_indices) == 0:      # 如果这张图没有行为0，就下一张图
                 continue
 
             for zero_row in zero_row_indices:
                 prev_row = zero_row - 1
+                # 上一行没有越界，并且上一行也全是0，则再取上一行。
                 while prev_row >= 0 and zero_row_mask[prev_row]:
                     prev_row -= 1
-                
+                # 如果一直取到头都没有满足条件的，则无法进入这条if语句，prev_row = -1
                 if prev_row >= 0: 
                     adj[zero_row, :] = adj[prev_row, :]
+
                 else:  
+                    # 向下遍历寻找
                     next_row = zero_row + 1
                     while next_row < n and zero_row_mask[next_row]:
                         next_row += 1
@@ -78,23 +78,17 @@ class Wavelet(torch.nn.Module):
         return adj_fixed_batch
 
 # 将原始信号转为小波滤波器处理后的
+# TODO
+# 这里几何散射变换的过程对吗
     def windowed(self, x, adj):
-        # y: B x N x T x dim
+        # 这里x输入的维度是B N T
         wavelets, low_pass = self.construct_wavelet(adj)
-        # 这里面将x转置了
         outputs = [[x.transpose(1, 2)]]
         for layer in range(self.level):
             layer_output = []
-            # 拿出时间维度
             for input in outputs[-1]:
-                # 小波滤波器组也是N*N的
-                # wavelet 是一个有三个项的列表，每项由一个B*116*116的矩阵组成
                 for wavelet in wavelets:
-
-                    print(f"wavelet:{wavelet.shape} , input:{input.shape}")
-
                     out = torch.matmul(wavelet, input)
-                    print(f"out:{out.shape}")
                     out = torch.abs(out)
                     layer_output.append(out)
             outputs.append(layer_output)
@@ -102,17 +96,18 @@ class Wavelet(torch.nn.Module):
         basis = torch.cat([torch.stack(layer, dim=-1) for layer in outputs], dim=-1)
 
         basis_shape = basis.shape
-        print(f"basis_spae:{basis_shape}")
-        # 将后两个维度合并为一个维度
+        # 将后两个维度合并为一个维度（这是为什么？）
         basis = basis.view(basis.shape[0], basis.shape[1], -1)
         # 这里为什么还要再乘以一个低通
         scattering_coeff = torch.matmul(low_pass, basis)
         scattering_coeff = scattering_coeff.view(basis_shape)
         # 这里返回的BNTdim，不然矩阵乘法会失败
         # B x N x T x dim
+        # 这是B N T dim还是B N T dim+1,就应该是B N T wavelet+1
+# TODO   
         return scattering_coeff
 
-
+# TODO:这里还么看懂
 # 这块感觉比较重要
     def nonwindowed(self, x, adj):
         wavelets, low_pass = self.construct_wavelet(adj)

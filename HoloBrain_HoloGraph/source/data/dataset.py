@@ -20,18 +20,23 @@ class HCPA_BoldSCDataset(Dataset):
             "FACENAME": 2,
             "VISMOTOR": 3,
         }
+        # 这里的data经过load_data函数返回的
         self.data = self._load_data()
 
     def _load_data(self):
         data = []
+        # 读取BOLD的文件，组成列表
         bold_files = [f for f in os.listdir(self.bold_dir) if f.endswith(".csv")]
         for bold_file in bold_files:
             try:
+                # 把文件名按下滑线划分
                 parts = bold_file.split("_")
                 subject_id = parts[0]
-                task_type = parts[1].split("-")[1]
+                task_type = parts[1].split("-")[1]  # task-REST --> REST
+                # 如果当前文件的状态不在label_mapping中，丢弃
                 if task_type not in self.label_mapping:
                     continue
+                # 拼接SC文件的完整路径
                 sc_path = os.path.join(self.sc_dir, subject_id, f"{subject_id}_space-T1w_desc-preproc_msmtconnectome.mat")
                 if not os.path.exists(sc_path):
                     continue
@@ -57,10 +62,12 @@ class HCPA_BoldSCDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
+        # 这是一个下表访问方法，实现这个可以下标访问数据
         bold, sc, label = self.data[idx]
         bold_tensor = torch.tensor(bold, dtype=torch.float32)
         fc = torch.corrcoef(bold_tensor.T)
         fc_tensor = torch.nan_to_num(fc)
+        # 这个sc没用上
         sc_tensor = torch.tensor(sc, dtype=torch.float32)
         label_tensor = torch.tensor(label, dtype=torch.long)
         return bold_tensor, fc_tensor, label_tensor
@@ -294,7 +301,7 @@ class ABIDE_BoldFCDataset(Dataset):
         phenotypic_csv="/home/hezhenkun/nilearn_data/ABIDE_pcp/Phenotypic_V1_0b_preprocessed1.csv",
         atlas="aal",
         expected_n=116,
-        fix_len=150,
+        fix_len=175,
         k=None,
         use_abs=True,
         zscore=True,

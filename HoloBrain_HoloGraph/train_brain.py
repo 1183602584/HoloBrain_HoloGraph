@@ -31,7 +31,7 @@ brick:
 
 
 
-def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, logger):
+def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, log):
     # 进行一次训练
     model.train()
     total_loss = 0.0
@@ -52,11 +52,11 @@ def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, devic
 
         optimizer.zero_grad()
         outputs, x_features, y_features = model(features, adj)
-
-        # 在多GPU上训练时，将多个GPU上的数据可以互相观测到
-        if accelerator.num_processes > 1:
-            outputs = torch.cat(all_gather(outputs), dim=0)
-            targets = torch.cat(all_gather(targets), dim=0)
+        # logit = outputs.argmax(dim=1)
+        # # 在多GPU上训练时，将多个GPU上的数据可以互相观测到
+        # if accelerator.num_processes > 1:
+        #     outputs = torch.cat(all_gather(outputs), dim=0)
+        #     targets = torch.cat(all_gather(targets), dim=0)
 
         # 输出与标签进行比较 output [B, hidden*N] 
         loss = criterion(outputs, targets)
@@ -70,11 +70,11 @@ def train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, devic
         ema.update() 
 
     avg_loss = total_loss / len(train_loader)
-    if accelerator.is_main_process:
-        logger.info(f"[Epoch {epoch+1}] Training Loss: {avg_loss:.4f}")
+    if accelerator.is_main_process :
+        log.info(f"[Epoch {epoch+1}] Training Loss: {avg_loss:.4f}")
     return avg_loss
 
-def evaluate(model, accelerator, test_loader, device, logger):
+def evaluate(model, accelerator, test_loader, device, log):
     model.eval()
     all_preds = []
     all_targets = []
@@ -92,6 +92,10 @@ def evaluate(model, accelerator, test_loader, device, logger):
             targets = targets.squeeze(1) if targets.dim() == 2 else targets
 
             outputs, x_features, y_features = model(features, adj)
+            # Kuramoto returns a list of x snapshots; stack them into a tensor.
+            if isinstance(x_features, list):
+                x_features = torch.cat(x_features, dim=1)       # (B, steps, hidden, node)
+                x_features = x_features.transpose(2, 3)         # (B, steps, node, hidden)
             if accelerator.num_processes > 1:
                 outputs = torch.cat(all_gather(outputs), dim=0)
                 targets = torch.cat(all_gather(targets), dim=0)
@@ -129,7 +133,7 @@ def main():
     parser.add_argument("--data", type=str, default="ABIDE", help="Dataset name")
     parser.add_argument("--num_nodes", type=int, default=116, help="Number of nodes")
     parser.add_argument("--feature_dim", type=int, default=175, help="Input feature dimension")
-    parser.add_argument("--num_class", type=int, default=4, help="Number of classes")
+    parser.add_argument("--num_class", type=int, default=2, help="Number of classes")
     parser.add_argument("--L", type=int, default=1, help="Number of Kuramoto solvers")
     parser.add_argument("--h", type=int, default=256, help="Hidden dimension")
     parser.add_argument("--T", type=int, default=8, help="Number of times steps")
@@ -151,9 +155,10 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     accelerator = Accelerator()
     device = accelerator.device
-    # device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+
 
     log = logger()
+    # 这里读取数据
     dataset = create_dataset(args.data)
 
     splits = 5
@@ -161,12 +166,13 @@ def main():
     all_fold_acc = []
     all_fold_pre = []
     all_fold_f1 = []
-    # k折交叉验证
+
     for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(dataset)):
 
         log.info(f"Fold {fold_idx}:")
 
         # sbuset: 拆分数据按照train_idx
+        # 这里可以靠索引读取数据，假设输入维度是B T N
         train_subset = Subset(dataset, train_idx)
         test_subset = Subset(dataset, test_idx)
 
@@ -175,7 +181,6 @@ def main():
         
         train_loader = DataLoader(
             train_subset,
-            # 这里写错了变量名应该是args.batchsize, 默认256有点太大
             batch_size=args.batchsize // accelerator.num_processes,
             shuffle=True,
             num_workers=args.num_workers,
@@ -198,10 +203,12 @@ def main():
             feature_dim=args.feature_dim,
             num_nodes=args.num_nodes,
             use_pe=args.use_pe,
-            node_cls=args.node_cls,
+            # 节点分类也设为默认关闭
+            node_cls=False,
             y_type=args.y_type,
             mapping_type=args.mapping_type,
-            parcellation=args.parcellation,
+            # 这里有修改， parcellation是脑区分割的意思
+            parcellation=False,
         ).to(device)
 
 
@@ -221,13 +228,16 @@ def main():
 
         # 开始训练epochs次
         for epoch in range(args.epochs):    
-            epoch_loss = train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, logger)
+            epoch_loss = train_one_epoch(model, ema, optimizer, scheduler, train_loader, epoch, device, accelerator, log)
             start_time = time.time()
-            metrics, features, inputs_data, gt = evaluate(model, accelerator, test_loader, device, logger)
+            metrics, features, inputs_data, gt = evaluate(model, accelerator, test_loader, device, log)
             elapsed_ms = (time.time() - start_time) * 1000 / len(gt)    # 计算总用时
             test_acc, pre, rec, f1 = metrics
-            log.info(f"Epoch {epoch+1}: Test Acc: {test_acc:.4f}, Precision: {pre:.4f}, Recall: {rec:.4f}, F1: {f1:.4f} "
-                        f"(Avg inference time: {elapsed_ms:.2f} ms)")
+            log.info(
+                    f"Epoch {epoch+1:03d} | Acc {test_acc:.4f} | Pre {pre:.4f} | Rec {rec:.4f} | "
+                    f"F1 {f1:.4f} | Avg {elapsed_ms:7.2f} ms"
+                    )
+
             
             # 更新准确值
             if test_acc > best_test_acc:

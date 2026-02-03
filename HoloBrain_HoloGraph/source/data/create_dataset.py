@@ -47,6 +47,6 @@ def create_dataset(data):
             fix_len=175,
             k=15,
             use_abs=True,
-            cache_fc_path="/home/hezhenkun/nilearn_data/abide_fc_cache.npy",  # 可选：强烈建议开
+            cache_fc_path="/home/hezhenkun/nilearn_data/abide_fc_cache2.npy",  # 可选：强烈建议开
         )
     return dataset
